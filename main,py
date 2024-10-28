@@ -1,0 +1,136 @@
+import numpy as np
+import spacy
+import logging
+import time
+from gensim.models import Word2Vec
+import streamlit as st
+from tensorflow.keras.models import load_model
+import sqlite3  # Database
+import streamlit_authenticator as stauth
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Configure logging
+logging.basicConfig(filename='app.log', level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Connect to SQLite database
+conn = sqlite3.connect('complaints.db')
+cursor = conn.cursor()
+
+# Create a table to store complaint details
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS complaints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        email TEXT,
+        phone TEXT,
+        complaint_details TEXT,
+        category TEXT,
+        status TEXT DEFAULT "Under Review",
+        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+''')
+conn.commit()
+
+# Sidebar styling with custom CSS
+st.markdown("""
+    <style>
+    .css-18e3th9 {
+        background-color: #DCDCDC !important;
+        color: #4B0082;
+    }
+    .css-1d391kg {
+        font-family: 'Arial', sans-serif;
+        color: #4B0082;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# Language selection
+language = st.sidebar.radio("Select Language / اختر اللغة", ("English", "العربية"))
+
+# Title and warning message
+title = "Intelligent Complaint Analysis System 🗳️" if language == "English" else "نظام تحليل الشكاوى الذكي 🗳️"
+st.markdown(f"<h1 style='text-align: center; color: #4B0082; font-family: cursive;'>{title}</h1>", unsafe_allow_html=True)
+st.warning("Ensure information is accurate before submitting." if language == "English" else "يرجى التأكد من صحة المعلومات قبل الإرسال.")
+
+# Authentication
+users = {"usernames": {"admin": {"name": "Admin", "password": "admin_pass"}}}
+authenticator = stauth.Authenticate(users, "ComplaintApp", "abcdef", cookie_expiry_days=1)
+name, authentication_status, username = authenticator.login(location="sidebar", key="login")
+
+if authentication_status:
+    authenticator.logout("Logout", "sidebar", key="logout")
+    st.sidebar.markdown(f"Welcome, **{name}**!" if language == "English" else f"مرحباً، **{name}**!")
+
+    # About the Dataset button
+    if st.button("About the Dataset" if language == "English" else "حول البيانات"):
+        st.write("The dataset provides insights into common complaint types." if language == "English" else "يوفر البيانات رؤى حول أنواع الشكاوى الشائعة.")
+
+    # Load models
+    @st.cache_resource
+    def load_models():
+        lstm_model = load_model('model.h5')
+        word2vec_model = Word2Vec.load("word2vec_model.bin")
+        return lstm_model, word2vec_model
+
+    # Function to insert complaints into the database
+    def insert_complaint(name, email, phone, complaint_details, category):
+        cursor.execute('''
+            INSERT INTO complaints (name, email, phone, complaint_details, category)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (name, email, phone, complaint_details, category))
+        conn.commit()
+
+    # Display User Inputs
+    def display_inputs():
+        st.markdown("### Enter Complaint Details" if language == "English" else "### إدخال تفاصيل الشكوى")
+        name = st.text_input('Name' if language == "English" else "الاسم")
+        email = st.text_input('Email' if language == "English" else "البريد الإلكتروني")
+        phone = st.text_input('Phone Number' if language == "English" else "رقم الهاتف")
+        complaint_details = st.text_area("Complaint Details" if language == "English" else "تفاصيل الشكوى")
+        category = st.selectbox("Complaint Category" if language == "English" else "تصنيف الشكوى", ["Billing Issues", "Connection Problems", "Customer Service", "Other"])
+        
+        return name, email, phone, complaint_details, category
+
+    # Prediction and insertion
+    def process_complaint(lstm_model, word2vec_model, complaint_details):
+        doc = spacy.blank("en")(complaint_details)
+        tokens = [token.lemma_.lower() for token in doc if not token.is_punct and not token.is_space]
+        vectors = [word2vec_model.wv[token] for token in tokens if token in word2vec_model.wv]
+        avg_vector = np.mean(vectors, axis=0) if vectors else np.zeros(word2vec_model.vector_size)
+        reshaped_vector = avg_vector.reshape((1, avg_vector.shape[0], 1))
+        return "Disputed" if lstm_model.predict(reshaped_vector)[0][0] > 0.5 else "Not Disputed"
+
+    # Dashboard for Admin
+    def admin_dashboard():
+        st.markdown("## Admin Dashboard" if language == "English" else "## لوحة التحكم")
+        complaints = pd.read_sql_query("SELECT * FROM complaints", conn)
+        st.write(complaints)
+
+        # Show analytics on complaints
+        st.write("### Complaint Statistics" if language == "English" else "### إحصائيات الشكاوى")
+        fig, ax = plt.subplots()
+        complaints['category'].value_counts().plot(kind='bar', ax=ax, color="purple")
+        plt.title("Complaint Distribution by Category")
+        plt.ylabel("Number of Complaints")
+        st.pyplot(fig)
+
+    # Main Application Flow
+    def main():
+        lstm_model, word2vec_model = load_models()
+        if name == "Admin":
+            admin_dashboard()
+        else:
+            name, email, phone, complaint_details, category = display_inputs()
+            if st.button("Submit" if language == "English" else "إرسال"):
+                prediction = process_complaint(lstm_model, word2vec_model, complaint_details)
+                insert_complaint(name, email, phone, complaint_details, category)
+                st.success("Complaint Submitted Successfully!" if language == "English" else "تم تقديم الشكوى بنجاح!")
+                st.write(prediction)
+                
+    main()
+
+# Close database connection at end of application
+conn.close()
